@@ -25,6 +25,9 @@ BATCH_SIZE = 32
 TEST_INTERVAL = 100
 TEST_CASES = 3
 
+# Summary
+SUMMARY_INTERVAL = 100
+
 class Trainer:
     ''' Receive transissions to train '''
 
@@ -32,26 +35,30 @@ class Trainer:
         ''' Add nodes to the net to calculate loss
             @param inLayer : input layer in the net
             @param outLayer : output layer in the net '''
+        with tf.name_scope('loss'):
+            self.sampledState = inLayer
+            self.sampledAction = tf.placeholder(tf.float32, outLayer.get_shape())
+            curQ = tf.reduce_sum(self.sampledAction * outLayer, 1) # filter out Q value for selected action
+            self.sampledQ = tf.placeholder(tf.float32, curQ.get_shape())
+            diffs = self.sampledQ - curQ
+            loss = tf.reduce_mean(tf.square(diffs))
+            self.optimizer = tf.train.AdamOptimizer(DESCENT_RATE).minimize(loss)
 
-        self.sampledState = inLayer
-        self.sampledAction = tf.placeholder(tf.float32, outLayer.get_shape())
-        curQ = tf.reduce_sum(self.sampledAction * outLayer, 1) # filter out Q value for selected action
-        self.sampledQ = tf.placeholder(tf.float32, curQ.get_shape())
-        loss = tf.reduce_mean(tf.square(self.sampledQ - curQ))
-        self.optimizer = tf.train.AdamOptimizer(DESCENT_RATE).minimize(loss)
+            tf.summary.histogram('diffs', diffs)
+            tf.summary.scalar('loss', loss)
 
-    def feed(self, sess, sampledState, sampledAction, sampledQ):
+    def getFeedDict(self, sampledState, sampledAction, sampledQ):
         ''' Train the net with samples
             @param sess : tf session
             @param sampledState : [sampleId][stateId] = whether this sample is of this state
             @param sampledAction : [sampleId][actionId] = whether this sample is of this action
             @param sampledQ : [sampleId] = sampled Q value in this sample '''
 
-        sess.run(self.optimizer, {
+        return {
             self.sampledState: sampledState,
             self.sampledAction: sampledAction,
             self.sampledQ: sampledQ
-        })
+        }
 
 class Net:
     ''' A MLP '''
@@ -64,13 +71,18 @@ class Net:
         self.layers = [] # [0] = input, [-1] = output
         self.layers.append(tf.placeholder(tf.float32, (None, dims[0])))
         for i in range(1, len(dims)):
-            coe = self._randomVariable((dims[i - 1], dims[i]))
-            bias = self._randomVariable((dims[i], )) # tf supports Broadcasting, so it's of 1D. And here is an extra comma
-            self.layers.append(tf.nn.relu(tf.matmul(self.layers[-1], coe) + bias))
+            with tf.name_scope('layer' + str(i)):
+                coe = self._randomVariable('coe', (dims[i - 1], dims[i]))
+                bias = self._randomVariable('bias', (dims[i], )) # tf supports Broadcasting, so it's of 1D. And here is an extra comma
+                self.layers.append(tf.nn.relu(tf.matmul(self.layers[-1], coe) + bias))
         self.trainer = Trainer(self.layers[0], self.layers[-1])
 
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
+
+        self.summaryWriter = tf.summary.FileWriter('logs', self.sess.graph)
+        self.summaries = tf.summary.merge_all()
+        self.trainCnt = 0
 
     def getQs(self, state):
         ''' Get Q values of state `state` '''
@@ -83,13 +95,22 @@ class Net:
         ''' Train '''
 
         toMat = lambda sample, length: list(map(lambda x: self._oneHotKey(x, length), sample))
-        self.trainer.feed(self.sess, sampledState, toMat(sampledAction, self.dims[-1]), sampledQ)
+        feedDict = self.trainer.getFeedDict(sampledState, toMat(sampledAction, self.dims[-1]), sampledQ)
+        if self.trainCnt % SUMMARY_INTERVAL == 0:
+            summary, _ = self.sess.run((self.summaries, self.trainer.optimizer), feedDict)
+            self.summaryWriter.add_summary(summary, self.trainCnt)
+        else:
+            self.sess.run(self.trainer.optimizer, feedDict)
+        self.trainCnt += 1
 
     @classmethod
-    def _randomVariable(cls, shape):
+    def _randomVariable(cls, name, shape):
         ''' Generate a variable node with random initial values of shape `shape` '''
 
-        return tf.Variable(tf.truncated_normal(shape))
+        with tf.name_scope(name):
+            ret = tf.Variable(tf.truncated_normal(shape))
+            tf.summary.histogram('histogram', ret)
+            return ret
 
     @classmethod
     def _oneHotKey(cls, x, length):
@@ -130,7 +151,7 @@ class Agent:
             'Q': reward if done else reward + GAMMA * numpy.max(self.net.getQs(oldState))
         })
         batch = random.sample(self.replay, min(len(self.replay), BATCH_SIZE))
-        self.net.feed([item['state'] for item in self.replay], [item['action'] for item in self.replay], [item['Q'] for item in self.replay])
+        self.net.feed([item['state'] for item in batch], [item['action'] for item in batch], [item['Q'] for item in batch])
 
 if __name__ == '__main__':
     env = gym.make(ENV_NAME)
