@@ -1,4 +1,14 @@
-#!/usr/bin/env python3
+# Please run this with IPython Notebook and Python3
+# use `%load main.py` to load this into a cell
+
+# Setup fake display
+from xvfbwrapper import Xvfb
+vdisplay = Xvfb()
+vdisplay.start()
+
+# Things below are used to display GIF
+%matplotlib inline
+import animation
 
 import gym
 import tensorflow as tf
@@ -149,11 +159,12 @@ if __name__ == '__main__':
 
         # Tests
         if i % TEST_INTERVAL == 0:
+            frames = []
             totReward = 0
             for case in range(TEST_CASES):
                 agent.reset()
                 for j in range(STEP):
-                    env.render()
+                    frames.append(env.render('rgb_array'))
                     oldState = agent.state
                     action = agent.optAction()
                     newState, reward, done, info = env.step(action)
@@ -163,4 +174,5 @@ if __name__ == '__main__':
                     agent.state = newState
             avgReward = totReward / TEST_CASES
             print("In %d-th episode, avgReward = %f"%(i, avgReward))
+            animation.display_frames_as_gif(frames)
 
