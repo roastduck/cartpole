@@ -6,23 +6,27 @@ import numpy
 import random
 import collections
 import shutil
+import math
+import itertools
 
 # Game
 ENV_NAME = "CartPole-v0"
 
 # NN
 DESCENT_RATE = 0.0001
-HIDDEN_LAYER_NODES = [5] # There are at most 5 peaks on the histogram
+HIDDEN_LAYER_NODES = [20] # Watch number of peaks on the histograms to tune this?
 
 # RL
-INIT_STDDEV = 0.001
-INIT_MEAN = 0
-INITIAL_EPS = 0.5
-FINAL_EPS = 0.01
+COE_INIT_MEAN = [0, 0]
+COE_INIT_STDDEV = [1, 1]
+BIAS_INIT_MEAN = [0.01, 0.01]
+BIAS_INIT_STDDEV = [0, 0]
+INIT_TEMP = 50
+FINAL_TEMP = 1
 GAMMA = 0.9
 EPISODE = 10000
 STEP = 300
-REPLAY_SIZE = 1000
+REPLAY_SIZE = 10000
 BATCH_SIZE = 32
 
 # Test
@@ -76,9 +80,10 @@ class Net:
         self.layers.append(tf.placeholder(tf.float32, (None, dims[0])))
         for i in range(1, len(dims)):
             with tf.name_scope('layer' + str(i)):
-                coe = self._randomVariable('coe', (dims[i - 1], dims[i]))
-                bias = self._randomVariable('bias', (dims[i], )) # tf supports Broadcasting, so it's of 1D. And here is an extra comma
-                self.layers.append(tf.nn.relu(tf.matmul(self.layers[-1], coe) + bias))
+                coe = self._randomVariable('coe', (dims[i - 1], dims[i]), COE_INIT_MEAN[i - 1], COE_INIT_STDDEV[i - 1])
+                bias = self._randomVariable('bias', (dims[i], ), BIAS_INIT_MEAN[i - 1], BIAS_INIT_STDDEV[i - 1])
+                # tf supports Broadcasting, so bias' of 1D. And here is an extra comma
+                self.layers.append(tf.nn.elu(tf.matmul(self.layers[-1], coe) + bias))
         self.trainer = Trainer(self.layers[0], self.layers[-1])
 
         self.sess = tf.Session()
@@ -109,11 +114,11 @@ class Net:
         self.trainCnt += 1
 
     @classmethod
-    def _randomVariable(cls, name, shape):
+    def _randomVariable(cls, name, shape, mean = 0, stddev = 1):
         ''' Generate a variable node with random initial values of shape `shape` '''
 
         with tf.name_scope(name):
-            ret = tf.Variable(tf.truncated_normal(shape, mean = INIT_MEAN, stddev = INIT_STDDEV))
+            ret = tf.Variable(tf.truncated_normal(shape, mean = mean, stddev = stddev))
             tf.summary.histogram('histogram', ret)
             return ret
 
@@ -128,7 +133,6 @@ class Agent:
     def __init__(self, env):
         self.env = env
         self.net = Net([env.observation_space.shape[0]] + HIDDEN_LAYER_NODES + [env.action_space.n])
-        self.eps = INITIAL_EPS
         self.replay = collections.deque()
 
     def reset(self):
@@ -141,11 +145,23 @@ class Agent:
 
         return numpy.argmax(self.net.getQs(self.state))
 
-    def epsGreedyAction(self, env):
-        ''' Return eps-greedy action from current state '''
+    def boltzmannAction(self, completeness):
+        ''' Return Boltzmann Exploration action from current state
+            @param completeness : current episode / total episode number '''
 
-        self.eps -= (INITIAL_EPS - FINAL_EPS) / EPISODE
-        return random.randint(0, env.action_space.n - 1) if random.random() < self.eps else self.optAction()
+        T = INIT_TEMP + (FINAL_TEMP - INIT_TEMP) * completeness
+        Qs = self.net.getQs(self.state)
+        n = len(Qs)
+        prob = [math.exp(Qs[i] / T) for i in range(n)]
+        accu = list(itertools.accumulate(prob))
+        rand = random.random() * accu[-1]
+        ret = n - 1 # To prevent numeric error
+        for i in reversed(range(n)):
+            if rand <= accu[i]:
+                ret = i
+                continue
+        # print("temp = %f, %s : %s -> %s"%(T, Qs, prob, ret))
+        return ret
     
     def perceive(self, oldState, action, newState, reward, done):
         ''' Train '''
@@ -153,7 +169,7 @@ class Agent:
         self.replay.append({
             'state': oldState,
             'action': action,
-            'Q': reward if done else reward + GAMMA * numpy.max(self.net.getQs(oldState))
+            'Q': reward if done else reward + GAMMA * numpy.max(self.net.getQs(newState))
         })
         if len(self.replay) > REPLAY_SIZE:
             self.replay.popleft()
@@ -164,11 +180,11 @@ def mainLoop(env, agent):
     ''' Main loop
         Left `env` and `agent` as parameters to make debugging easier '''
 
-    for i in range(EPISODE):
+    for i in range(EPISODE + 1): # +1 to enable the last test
         agent.reset()
         for j in range(STEP):
             oldState = agent.state
-            action = agent.epsGreedyAction(env)
+            action = agent.boltzmannAction(float(i) / EPISODE)
             newState, reward, done, info = env.step(action)
             agent.perceive(oldState, action, newState, reward, done)
             if done:
@@ -182,7 +198,7 @@ def mainLoop(env, agent):
                 agent.reset()
                 success = True
                 for j in range(STEP):
-                    env.render()
+                    # env.render()
                     oldState = agent.state
                     action = agent.optAction()
                     newState, reward, done, info = env.step(action)
