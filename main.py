@@ -5,14 +5,18 @@ import tensorflow as tf
 import numpy
 import random
 import collections
+import shutil
 
 # Game
 ENV_NAME = "CartPole-v0"
 
 # NN
 DESCENT_RATE = 0.0001
+HIDDEN_LAYER_NODES = [5] # There are at most 5 peaks on the histogram
 
 # RL
+INIT_STDDEV = 0.001
+INIT_MEAN = 0
 INITIAL_EPS = 0.5
 FINAL_EPS = 0.01
 GAMMA = 0.9
@@ -80,6 +84,7 @@ class Net:
         self.sess = tf.Session()
         self.sess.run(tf.global_variables_initializer())
 
+        shutil.rmtree('logs')
         self.summaryWriter = tf.summary.FileWriter('logs', self.sess.graph)
         self.summaries = tf.summary.merge_all()
         self.trainCnt = 0
@@ -89,7 +94,7 @@ class Net:
 
         return self.sess.run(self.layers[-1], {
             self.layers[0]: (state, ) # yes, here is an extra comma
-        })
+        })[0]
 
     def feed(self, sampledState, sampledAction, sampledQ):
         ''' Train '''
@@ -108,7 +113,7 @@ class Net:
         ''' Generate a variable node with random initial values of shape `shape` '''
 
         with tf.name_scope(name):
-            ret = tf.Variable(tf.truncated_normal(shape))
+            ret = tf.Variable(tf.truncated_normal(shape, mean = INIT_MEAN, stddev = INIT_STDDEV))
             tf.summary.histogram('histogram', ret)
             return ret
 
@@ -122,7 +127,7 @@ class Agent:
 
     def __init__(self, env):
         self.env = env
-        self.net = Net((env.observation_space.shape[0], 20, env.action_space.n))
+        self.net = Net([env.observation_space.shape[0]] + HIDDEN_LAYER_NODES + [env.action_space.n])
         self.eps = INITIAL_EPS
         self.replay = collections.deque()
 
@@ -136,7 +141,7 @@ class Agent:
 
         return numpy.argmax(self.net.getQs(self.state))
 
-    def epsGreedyAction(self):
+    def epsGreedyAction(self, env):
         ''' Return eps-greedy action from current state '''
 
         self.eps -= (INITIAL_EPS - FINAL_EPS) / EPISODE
@@ -150,18 +155,20 @@ class Agent:
             'action': action,
             'Q': reward if done else reward + GAMMA * numpy.max(self.net.getQs(oldState))
         })
+        if len(self.replay) > REPLAY_SIZE:
+            self.replay.popleft()
         batch = random.sample(self.replay, min(len(self.replay), BATCH_SIZE))
         self.net.feed([item['state'] for item in batch], [item['action'] for item in batch], [item['Q'] for item in batch])
 
-if __name__ == '__main__':
-    env = gym.make(ENV_NAME)
-    agent = Agent(env)
+def mainLoop(env, agent):
+    ''' Main loop
+        Left `env` and `agent` as parameters to make debugging easier '''
 
     for i in range(EPISODE):
         agent.reset()
         for j in range(STEP):
             oldState = agent.state
-            action = agent.epsGreedyAction()
+            action = agent.epsGreedyAction(env)
             newState, reward, done, info = env.step(action)
             agent.perceive(oldState, action, newState, reward, done)
             if done:
@@ -173,6 +180,7 @@ if __name__ == '__main__':
             totReward = 0
             for case in range(TEST_CASES):
                 agent.reset()
+                success = True
                 for j in range(STEP):
                     env.render()
                     oldState = agent.state
@@ -180,8 +188,18 @@ if __name__ == '__main__':
                     newState, reward, done, info = env.step(action)
                     totReward += reward
                     if done:
+                        success = False
+                        print("  Failed in %s steps"%(j))
                         break
                     agent.state = newState
+                if success:
+                    print("  Success")
             avgReward = totReward / TEST_CASES
             print("In %d-th episode, avgReward = %f"%(i, avgReward))
+
+if __name__ == '__main__':
+
+    env = gym.make(ENV_NAME)
+    agent = Agent(env)
+    mainLoop(env, agent)
 
